@@ -15,7 +15,7 @@ import type { Advice } from '@/types/advice'
 export const DB_NAME = 'gbtunnelcrack'
 
 /** 当前数据结构版本号：调整表结构必须递增并补 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -52,7 +52,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type SectionRow = Section & Revisioned
 export type RingRow = Ring & Revisioned
@@ -80,7 +80,7 @@ class TunnelCrackDatabase extends Dexie {
     })
 
     // v2：裂缝补充 sectionId 冗余列（按区间筛选/统计免联表）；复测补充 surveyor 索引；建议补充 note 字段
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         sections: 'id, line, structureType, startMileage, updatedAt',
         rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
@@ -99,7 +99,7 @@ class TunnelCrackDatabase extends Dexie {
         ]
         for (const table of tables) {
           await table.toCollection().modify((row: Record<string, unknown>) => {
-            row.revision = ROW_REVISION
+            row.revision = 2
           })
         }
 
@@ -125,6 +125,31 @@ class TunnelCrackDatabase extends Dexie {
               survey.deltaWidthMm = 0
             }
           })
+      })
+
+    // v3：整治建议补充完工日期 finishedAt（观察期以完工日期为起点，旧记录缺日期由界面标待补，不回填）
+    this.version(DB_VERSION)
+      .stores({
+        sections: 'id, line, structureType, startMileage, updatedAt',
+        rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
+        cracks: 'id, ringId, sectionId, code, position, direction, state, updatedAt',
+        surveys: 'id, crackId, seq, date, surveyor, updatedAt',
+        advices: 'id, crackId, level, measure, state, finishedAt, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 行修订号升到 3；finishedAt 故意不做兜底回填，缺失日期必须在界面上「待补」
+        const tables: Array<Table<Record<string, unknown>, string>> = [
+          tx.table('sections'),
+          tx.table('rings'),
+          tx.table('cracks'),
+          tx.table('surveys'),
+          tx.table('advices')
+        ]
+        for (const table of tables) {
+          await table.toCollection().modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION
+          })
+        }
       })
   }
 }
@@ -182,9 +207,9 @@ const SEED_CRACKS: CrackRow[] = [
   { id: 'crack-1', ringId: 'ring-1', sectionId: 'sec-1', code: 'SL-118-01', position: '拱顶', direction: '纵向', widthMm: 0.42, lengthMm: 620, state: '待整治', createdAt: stamp(-110), updatedAt: stamp(-3), revision: ROW_REVISION },
   { id: 'crack-2', ringId: 'ring-1', sectionId: 'sec-1', code: 'SL-118-02', position: '侧墙', direction: '环向', widthMm: 0.18, lengthMm: 410, state: '观察', createdAt: stamp(-110), updatedAt: stamp(-8), revision: ROW_REVISION },
   { id: 'crack-3', ringId: 'ring-2', sectionId: 'sec-1', code: 'SL-132-01', position: '道床', direction: '斜向', widthMm: 0.55, lengthMm: 880, state: '待整治', createdAt: stamp(-104), updatedAt: stamp(-3), revision: ROW_REVISION },
-  { id: 'crack-4', ringId: 'ring-3', sectionId: 'sec-1', code: 'SL-145-01', position: '拱顶', direction: '环向', widthMm: 0.24, lengthMm: 350, state: '观察', createdAt: stamp(-99), updatedAt: stamp(-9), revision: ROW_REVISION },
+  { id: 'crack-4', ringId: 'ring-3', sectionId: 'sec-1', code: 'SL-145-01', position: '拱顶', direction: '环向', widthMm: 0.24, lengthMm: 350, state: '已整治', createdAt: stamp(-99), updatedAt: stamp(-25), revision: ROW_REVISION },
   { id: 'crack-5', ringId: 'ring-4', sectionId: 'sec-2', code: 'NL-027-01', position: '侧墙', direction: '纵向', widthMm: 0.38, lengthMm: 540, state: '已整治', createdAt: stamp(-88), updatedAt: stamp(-20), revision: ROW_REVISION },
-  { id: 'crack-6', ringId: 'ring-5', sectionId: 'sec-2', code: 'NL-041-01', position: '拱顶', direction: '斜向', widthMm: 0.12, lengthMm: 260, state: '观察', createdAt: stamp(-60), updatedAt: stamp(-6), revision: ROW_REVISION }
+  { id: 'crack-6', ringId: 'ring-5', sectionId: 'sec-2', code: 'NL-041-01', position: '拱顶', direction: '斜向', widthMm: 0.12, lengthMm: 260, state: '已整治', createdAt: stamp(-60), updatedAt: stamp(-3), revision: ROW_REVISION }
 ]
 
 const SEED_SURVEYS: SurveyRow[] = [
@@ -200,21 +225,29 @@ const SEED_SURVEYS: SurveyRow[] = [
   { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
   { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
   { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
-  // crack-4：0.24 → 0.30，末次月均 0.06 mm/月（一般）
+  // crack-4（已整治，完工 2024-05-20）：完工后首测回退反弹 +0.09 mm 重新累计，随后连续 2 次稳定，还差 1 次
   { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
   { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
-  // crack-5（已整治）：0.38 → 0.46 后停止复测
+  { id: 'sv-4-3', crackId: 'crack-4', seq: 3, date: '2024-05-26', widthMm: 0.39, lengthMm: 372, deltaWidthMm: 0.09, surveyor: '陈立', createdAt: stamp(-25), updatedAt: stamp(-25), revision: ROW_REVISION },
+  { id: 'sv-4-4', crackId: 'crack-4', seq: 4, date: '2024-06-05', widthMm: 0.42, lengthMm: 378, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-15), updatedAt: stamp(-15), revision: ROW_REVISION },
+  { id: 'sv-4-5', crackId: 'crack-4', seq: 5, date: '2024-06-16', widthMm: 0.45, lengthMm: 380, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-4), updatedAt: stamp(-4), revision: ROW_REVISION },
+  // crack-5（已整治，完工 2024-03-25）：以完工前末次 0.46 为基准，完工后连续三次增幅 ≤0.05 mm 且速率低于预警线，可结案
   { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
   { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
-  // crack-6：仅初测一次
+  { id: 'sv-5-3', crackId: 'crack-5', seq: 3, date: '2024-04-09', widthMm: 0.49, lengthMm: 552, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-72), updatedAt: stamp(-72), revision: ROW_REVISION },
+  { id: 'sv-5-4', crackId: 'crack-5', seq: 4, date: '2024-04-30', widthMm: 0.52, lengthMm: 555, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-51), updatedAt: stamp(-51), revision: ROW_REVISION },
+  { id: 'sv-5-5', crackId: 'crack-5', seq: 5, date: '2024-05-20', widthMm: 0.55, lengthMm: 556, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-31), updatedAt: stamp(-31), revision: ROW_REVISION },
+  // crack-6（已整治但建议漏填完工日期）：仅初测一次，界面标「完工日期待补」
   { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
 ]
 
 const SEED_ADVICES: AdviceRow[] = [
   { id: 'ad-1', crackId: 'crack-1', level: '严重', measure: '钢板带', basis: '月均发展速率 0.310 mm/月，超过严重阈值 0.25 mm/月', state: '已下发', createdAt: stamp(-10), updatedAt: stamp(-2), revision: ROW_REVISION },
   { id: 'ad-2', crackId: 'crack-3', level: '较重', measure: '嵌缝', basis: '月均发展速率 0.260 mm/月，超过预警阈值 0.10 mm/月', state: '待下发', createdAt: stamp(-8), updatedAt: stamp(-8), revision: ROW_REVISION },
-  { id: 'ad-3', crackId: 'crack-5', level: '一般', measure: '观测', basis: '月均发展速率 0.080 mm/月，处于观察范围，整治后继续观测', state: '已完成', createdAt: stamp(-85), updatedAt: stamp(-30), revision: ROW_REVISION },
-  { id: 'ad-4', crackId: 'crack-2', level: '一般', measure: '注浆', basis: '宽度缓慢增长，侧墙环向裂缝建议预防性注浆封堵', state: '待下发', createdAt: stamp(-7), updatedAt: stamp(-7), revision: ROW_REVISION }
+  { id: 'ad-3', crackId: 'crack-5', level: '一般', measure: '观测', basis: '月均发展速率 0.080 mm/月，处于观察范围，整治后继续观测', state: '已完成', finishedAt: '2024-03-25', createdAt: stamp(-85), updatedAt: stamp(-30), revision: ROW_REVISION },
+  { id: 'ad-4', crackId: 'crack-2', level: '一般', measure: '注浆', basis: '宽度缓慢增长，侧墙环向裂缝建议预防性注浆封堵', state: '待下发', createdAt: stamp(-7), updatedAt: stamp(-7), revision: ROW_REVISION },
+  { id: 'ad-5', crackId: 'crack-4', level: '一般', measure: '嵌缝', basis: '拱顶环向裂缝已嵌缝整治，完工后按测次复测，连续三次增幅不超过 0.05 mm 方可结案', state: '已完成', finishedAt: '2024-05-20', createdAt: stamp(-30), updatedAt: stamp(-25), revision: ROW_REVISION },
+  { id: 'ad-6', crackId: 'crack-6', level: '一般', measure: '观测', basis: '拱顶斜向裂缝整治完成，完工日期待班组补填后再计算观察期', state: '已完成', createdAt: stamp(-10), updatedAt: stamp(-3), revision: ROW_REVISION }
 ]
 
 /** 幂等播种：仅当主表为空时写入演示数据 */

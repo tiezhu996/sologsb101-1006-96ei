@@ -10,6 +10,7 @@ import { Delete, Download, Edit, Plus, Refresh, RefreshRight, Right, Upload } fr
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import LevelTag from '@/components/common/LevelTag.vue'
+import ObservationTag from '@/components/common/ObservationTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore } from '@/stores/crackStore'
 import { useSectionStore } from '@/stores/sectionStore'
@@ -110,10 +111,15 @@ const formRef = ref<FormInstance>()
 const form = reactive<AdviceDraft>({ ...EMPTY_ADVICE_DRAFT })
 let editingId: string | null = null
 
-const rules: FormRules = {
+/** 完工日期必填：状态为「已完成」时，观察期要按完工日期起算 */
+const rules = computed<FormRules>(() => ({
   crackId: [{ required: true, message: '请选择裂缝', trigger: 'change' }],
-  basis: [{ required: true, message: '请填写判定依据', trigger: 'blur' }]
-}
+  basis: [{ required: true, message: '请填写判定依据', trigger: 'blur' }],
+  finishedAt:
+    form.state === '已完成'
+      ? [{ required: true, message: '已完成的建议必须登记完工日期（观察期起点）', trigger: 'change' }]
+      : []
+}))
 
 const crackOptions = computed(() =>
   crackStore.cracks.map((crack) => {
@@ -146,7 +152,8 @@ function openEdit(advice: AdviceRow): void {
     level: advice.level,
     measure: advice.measure,
     basis: advice.basis,
-    state: advice.state
+    state: advice.state,
+    finishedAt: advice.finishedAt ?? ''
   })
   dialogVisible.value = true
 }
@@ -156,11 +163,12 @@ async function submit(): Promise<void> {
   if (!instance) return
   const valid = await instance.validate().catch(() => false)
   if (!valid) return
+  const payload: AdviceDraft = { ...form, finishedAt: form.state === '已完成' ? form.finishedAt : '' }
   if (editingId) {
-    await adviceTable.update(editingId, { ...form })
+    await adviceTable.update(editingId, { ...payload })
     ElMessage.success('整治建议已更新')
   } else {
-    await adviceTable.create({ ...form }, 'ad')
+    await adviceTable.create({ ...payload }, 'ad')
     ElMessage.success('整治建议已创建')
   }
   dialogVisible.value = false
@@ -183,6 +191,33 @@ async function advance(advice: AdviceRow): Promise<void> {
   const next = ADVICE_STATE_FLOW[advice.state]
   if (!next) {
     ElMessage.info('该建议已完成闭环')
+    return
+  }
+  // 已下发 → 已完成：必须登记完工日期，作为后续复测观察的起算点
+  if (next === '已完成') {
+    let finishedAt = advice.finishedAt ?? ''
+    if (!finishedAt) {
+      try {
+        const { value } = await ElMessageBox.prompt(
+          '整治已完工，请登记完工日期。观察期将以完工前最后一次读数为基准、完工后测次连续三次稳定才可结案。',
+          `登记完工日期 · ${crackOf(advice.crackId)?.code ?? ''}`,
+          {
+            confirmButtonText: '确认完工',
+            cancelButtonText: '取消',
+            inputPlaceholder: 'YYYY-MM-DD',
+            inputValue: new Date().toISOString().slice(0, 10),
+            inputValidator: (input: string) =>
+              /^\d{4}-\d{2}-\d{2}$/.test(input.trim()) ? true : '请输入合法日期，格式 YYYY-MM-DD'
+          }
+        )
+        finishedAt = value.trim()
+      } catch {
+        return
+      }
+    }
+    await adviceTable.update(advice.id, { state: next, finishedAt })
+    ElMessage.success(`建议已完工（${finishedAt}），复测观察从完工日期起算`)
+    await refreshCounts()
     return
   }
   await adviceTable.update(advice.id, { state: next })
@@ -346,6 +381,22 @@ function adviceRowKey(row: AdviceRow): string {
             {{ (surveyStore.rateMap[row.crackId] ?? 0).toFixed(3) }} mm/月
           </template>
         </el-table-column>
+        <el-table-column label="完工日期" width="130">
+          <template #default="{ row }">
+            <el-tag v-if="row.state === '已完成' && !row.finishedAt" size="small" type="warning" effect="plain">
+              待补
+            </el-tag>
+            <span v-else>{{ row.finishedAt || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="观察期" min-width="170">
+          <template #default="{ row }">
+            <ObservationTag
+              :status="surveyStore.observationOf(row.crackId)"
+              show-hint
+            />
+          </template>
+        </el-table-column>
         <el-table-column label="当前宽度" width="120">
           <template #default="{ row }">
             {{ formatMm(crackOf(row.crackId)?.widthMm ?? 0) }}
@@ -439,6 +490,22 @@ function adviceRowKey(row: AdviceRow): string {
             <el-option v-for="item in ADVICE_STATES" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
+        <el-form-item label="完工日期" prop="finishedAt">
+          <el-date-picker
+            v-model="form.finishedAt"
+            type="date"
+            value-format="YYYY-MM-DD"
+            style="width: 100%"
+            placeholder="已完成建议必填，漏填将标「待补」"
+            :disabled="form.state !== '已完成'"
+          />
+        </el-form-item>
+        <el-alert
+          v-if="form.state === '已完成'"
+          type="info"
+          :closable="false"
+          title="观察期按完工日期起算：首次对照完工前最后一次读数，完工后连续三次增幅不超过 0.05 mm 且最新速率低于 0.10 mm/月 才可结案。"
+        />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>

@@ -10,6 +10,7 @@ import { Delete, Edit, Plus } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import LevelTag from '@/components/common/LevelTag.vue'
+import ObservationTag from '@/components/common/ObservationTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore, type CrackEnriched } from '@/stores/crackStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -59,6 +60,29 @@ function onFilterChange(model: FilterModel): void {
 }
 
 const candidateCracks = computed(() => crackStore.filtered)
+
+/* ---------------------------- 观察期标注 ---------------------------- */
+
+const observation = computed(() => trend.observation.value)
+
+const baselineSeq = computed(() => observation.value?.baseline?.seq ?? null)
+const observationSeqs = computed<Set<number>>(
+  () => new Set((observation.value?.points ?? []).map((point) => point.seq))
+)
+
+function detailRowClass({ row }: { row: { seq: number } }): string {
+  if (baselineSeq.value === row.seq) return 'row-baseline'
+  if (observationSeqs.value.has(row.seq)) return 'row-observation'
+  return ''
+}
+
+/** 完工基准竖线在折线图上的横坐标（落在该测点位置） */
+const baselineX = computed<number | null>(() => {
+  const seq = baselineSeq.value
+  if (seq === null || !chart.value) return null
+  const point = chart.value.coords.find((item) => item.seq === seq)
+  return point ? point.x : null
+})
 
 /* ------------------------------ 折线图 ------------------------------ */
 
@@ -254,6 +278,21 @@ function selectCrack(crackId: string): void {
             </div>
           </div>
 
+          <el-alert
+            v-if="observation && observation.phase !== '未完工'"
+            :type="observation.phase === '可结案' ? 'success' : observation.phase === '待补日期' || observation.phase === '缺基准' ? 'warning' : 'info'"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 12px"
+          >
+            <template #title>
+              <div class="obs-banner">
+                <ObservationTag :status="observation" />
+                <span>{{ observation.hint }}</span>
+              </div>
+            </template>
+          </el-alert>
+
           <div v-if="!chart" class="empty-panel is-compact">
             <p class="empty-panel__desc">该裂缝还没有复测记录，点击「追加测次」录入第一条读数。</p>
           </div>
@@ -279,8 +318,33 @@ function selectCrack(crackId: string): void {
               <text :x="8" :y="chart.top + 4" fill="#5b6b82" font-size="12">{{ chart.max.toFixed(2) }}</text>
               <text :x="8" :y="chart.baseline" fill="#5b6b82" font-size="12">{{ chart.min.toFixed(2) }}</text>
               <polyline :points="chart.polyline" fill="none" stroke="#2b5c94" stroke-width="2.5" stroke-linejoin="round" />
+              <line
+                v-if="baselineX !== null"
+                :x1="baselineX"
+                :y1="chart.top - 6"
+                :x2="baselineX"
+                :y2="chart.baseline"
+                stroke="#e08a2e"
+                stroke-width="1.5"
+                stroke-dasharray="5 4"
+              />
+              <text
+                v-if="baselineX !== null"
+                :x="baselineX"
+                :y="chart.top - 10"
+                fill="#b46a16"
+                font-size="10"
+                text-anchor="middle"
+              >完工基准</text>
               <g v-for="point in chart.coords" :key="point.seq">
-                <circle :cx="point.x" :cy="point.y" r="4.5" fill="#fff" stroke="#13335c" stroke-width="2.5" />
+                <circle
+                  :cx="point.x"
+                  :cy="point.y"
+                  r="4.5"
+                  :fill="observationSeqs.has(point.seq) ? '#1e8449' : baselineSeq === point.seq ? '#e08a2e' : '#fff'"
+                  stroke="#13335c"
+                  stroke-width="2.5"
+                />
                 <text :x="point.x" :y="point.y - 12" fill="#16233a" font-size="12" text-anchor="middle">
                   {{ point.widthMm.toFixed(2) }}
                 </text>
@@ -295,9 +359,21 @@ function selectCrack(crackId: string): void {
           </div>
 
           <h4 class="panel-subtitle">测次明细</h4>
-          <el-table :data="trend.surveys.value" border stripe size="small">
+          <el-table
+            :data="trend.surveys.value"
+            border
+            stripe
+            size="small"
+            :row-class-name="detailRowClass"
+          >
             <el-table-column prop="seq" label="测次" width="70" />
-            <el-table-column prop="date" label="复测日期" width="120" />
+            <el-table-column label="复测日期" width="180">
+              <template #default="{ row }">
+                {{ row.date }}
+                <el-tag v-if="baselineSeq === row.seq" size="small" type="warning" effect="plain">完工前基准</el-tag>
+                <el-tag v-else-if="observationSeqs.has(row.seq)" size="small" type="success" effect="plain">观察期</el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="宽度(mm)" width="110">
               <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
             </el-table-column>
@@ -386,5 +462,21 @@ function selectCrack(crackId: string): void {
 
 svg text {
   font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.obs-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  line-height: 1.6;
+}
+
+:deep(.row-baseline) {
+  background: #fdf3e3 !important;
+}
+
+:deep(.row-observation) {
+  background: #eaf6ee !important;
 }
 </style>

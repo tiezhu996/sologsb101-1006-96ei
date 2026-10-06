@@ -10,6 +10,7 @@ import { Delete, Download, Edit, Plus, Refresh, Right } from '@element-plus/icon
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import LevelTag from '@/components/common/LevelTag.vue'
+import ObservationTag from '@/components/common/ObservationTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore, type CrackEnriched } from '@/stores/crackStore'
 import { useSectionStore } from '@/stores/sectionStore'
@@ -332,6 +333,11 @@ function latestDateOf(crackId: string): string {
             >
               {{ row.crack.state }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="观察期" width="150">
+          <template #default="{ row }">
+            <ObservationTag :status="row.observation" show-hint />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="240" fixed="right">

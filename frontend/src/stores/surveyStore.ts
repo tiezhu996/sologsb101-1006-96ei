@@ -5,10 +5,11 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { useIdbTable } from '@/hooks/useIdbTable'
-import { db, type SurveyRow } from '@/utils/db'
+import { db, type AdviceRow, type SurveyRow } from '@/utils/db'
 import type { Survey, SurveyDraft } from '@/types/survey'
-import type { AdviceLevel } from '@/types/advice'
+import type { Advice, AdviceLevel } from '@/types/advice'
 import { buildSurveyPoints, levelFromRate, round } from '@/utils/rate'
+import { evaluateObservation, type ObservationStatus } from '@/utils/observation'
 
 export interface CrackRateSummary {
   crackId: string
@@ -28,6 +29,7 @@ export interface CrackRateSummary {
 
 export const useSurveyStore = defineStore('survey', () => {
   const surveyTable = useIdbTable<SurveyRow>((database) => database.surveys, { sortByUpdatedAt: false })
+  const adviceTable = useIdbTable<AdviceRow>((database) => database.advices, { sortByUpdatedAt: false })
 
   /** 正在查看的裂缝 id（复测对比页与速率分级页共用） */
   const activeCrackId = ref<string | null>(null)
@@ -89,6 +91,45 @@ export const useSurveyStore = defineStore('survey', () => {
   })
 
   const warningCrackIds = computed(() => rates.value.filter((item) => item.level !== '一般').map((item) => item.crackId))
+
+  /** 多条建议并存时的优先级：已完成（观察以其完工日期为准）最高 */
+  const advicePriority = (state: Advice['state']): number =>
+    state === '已完成' ? 3 : state === '已下发' ? 2 : 1
+
+  /** 每条裂缝当前生效的建议 */
+  const effectiveAdviceMap = computed<Record<string, AdviceRow>>(() => {
+    const map: Record<string, AdviceRow> = {}
+    adviceTable.rows.value.forEach((advice) => {
+      const current = map[advice.crackId]
+      if (
+        !current ||
+        advicePriority(advice.state) > advicePriority(current.state) ||
+        (advicePriority(advice.state) === advicePriority(current.state) && advice.updatedAt > current.updatedAt)
+      ) {
+        map[advice.crackId] = advice
+      }
+    })
+    return map
+  })
+
+  /**
+   * 观察期判定（按完工日期起算）：
+   * 只有存在整治建议的裂缝才进入判定，结论同步给趋势、建议与复测页。
+   */
+  const observationMap = computed<Record<string, ObservationStatus>>(() => {
+    const map: Record<string, ObservationStatus> = {}
+    Object.entries(effectiveAdviceMap.value).forEach(([crackId, advice]) => {
+      const status = evaluateObservation({
+        state: advice.state,
+        finishedAt: advice.finishedAt,
+        surveys: surveys.value.filter((survey) => survey.crackId === crackId)
+      })
+      if (status) map[crackId] = status
+    })
+    return map
+  })
+
+  const observationOf = (crackId: string): ObservationStatus | null => observationMap.value[crackId] ?? null
 
   const summaryOf = (crackId: string): CrackRateSummary | null =>
     rates.value.find((item) => item.crackId === crackId) ?? null
@@ -174,6 +215,9 @@ export const useSurveyStore = defineStore('survey', () => {
     rateMap,
     levelMap,
     warningCrackIds,
+    observationMap,
+    effectiveAdviceMap,
+    observationOf,
     activeCrackId,
     surveysOf,
     summaryOf,

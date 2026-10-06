@@ -10,6 +10,7 @@ import { Delete, Edit, MagicStick, View } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import LevelTag from '@/components/common/LevelTag.vue'
+import ObservationTag from '@/components/common/ObservationTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore, type CrackEnriched } from '@/stores/crackStore'
 import { useSectionStore } from '@/stores/sectionStore'
@@ -74,6 +75,7 @@ const ranked = computed<CrackEnriched[]>(() => {
 
 const severeRows = computed(() => crackStore.enriched.filter((item) => item.level === '严重'))
 const warningRows = computed(() => crackStore.enriched.filter((item) => item.level !== '一般'))
+const closeableRows = computed(() => crackStore.enriched.filter((item) => item.observation?.canClose))
 
 const averageRate = computed(() => {
   const rated = crackStore.enriched.filter((item) => item.surveyCount > 1)
@@ -116,7 +118,8 @@ const adviceForm = reactive<AdviceDraft>({
   level: '一般',
   measure: '观测',
   basis: '',
-  state: '待下发'
+  state: '待下发',
+  finishedAt: ''
 })
 
 function openAdviceEdit(row: CrackEnriched): void {
@@ -130,7 +133,8 @@ function openAdviceEdit(row: CrackEnriched): void {
     level: advice.level,
     measure: advice.measure,
     basis: advice.basis,
-    state: advice.state
+    state: advice.state,
+    finishedAt: advice.finishedAt ?? ''
   })
   adviceDialogVisible.value = true
 }
@@ -143,6 +147,7 @@ async function submitAdvice(): Promise<void> {
     measure: adviceForm.measure,
     basis: adviceForm.basis.trim(),
     state: adviceForm.state,
+    finishedAt: adviceForm.state === '已完成' ? adviceForm.finishedAt : '',
     updatedAt: Date.now()
   })
   ElMessage.success('整治建议已更新')
@@ -190,6 +195,27 @@ function sortByRate(a: CrackEnriched, b: CrackEnriched): number {
 function onOnlyWarningChange(value: string | number | boolean): void {
   crackStore.setOnlyWarning(value === true)
 }
+
+/* --------------------------- 观察期标注 --------------------------- */
+
+function isBaselineRow(seq: number): boolean {
+  const status = drawerTrend.observation.value
+  return !!status?.baseline && status.baseline.seq === seq
+}
+
+const observationSeqs = computed<Set<number>>(
+  () => new Set((drawerTrend.observation.value?.points ?? []).map((point) => point.seq))
+)
+
+function isObservationSeq(seq: number): boolean {
+  return observationSeqs.value.has(seq)
+}
+
+function drawerRowClass({ row }: { row: { seq: number } }): string {
+  if (isBaselineRow(row.seq)) return 'row-baseline'
+  if (isObservationSeq(row.seq)) return 'row-observation'
+  return ''
+}
 </script>
 
 <template>
@@ -215,6 +241,7 @@ function onOnlyWarningChange(value: string | number | boolean): void {
       <StatBadge label="裂缝总数" :value="crackStore.cracks.length" suffix="条" icon="Files" tone="primary" />
       <StatBadge label="预警裂缝" :value="warningRows.length" suffix="条" icon="WarningFilled" tone="warning" />
       <StatBadge label="严重裂缝" :value="severeRows.length" suffix="条" icon="CircleCloseFilled" tone="danger" />
+      <StatBadge label="观察可结案" :value="closeableRows.length" suffix="条" icon="CircleCheckFilled" tone="success" />
       <StatBadge label="平均月均速率" :value="averageRate.toFixed(3)" suffix="mm/月" icon="TrendCharts" tone="info" />
     </div>
 
@@ -291,6 +318,11 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <span v-else class="muted">未生成</span>
           </template>
         </el-table-column>
+        <el-table-column label="观察期" width="150">
+          <template #default="{ row }">
+            <ObservationTag :status="surveyStore.observationOf(row.crack.id)" show-hint />
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="196" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text type="primary" @click="openDrawer(row)">
@@ -347,6 +379,22 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <el-option v-for="item in ADVICE_STATES" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
+        <el-form-item label="完工日期">
+          <el-date-picker
+            v-model="adviceForm.finishedAt"
+            type="date"
+            value-format="YYYY-MM-DD"
+            style="width: 100%"
+            placeholder="已完成建议必填，观察期按此日期起算"
+            :disabled="adviceForm.state !== '已完成'"
+          />
+        </el-form-item>
+        <el-alert
+          v-if="adviceForm.state === '已完成'"
+          type="info"
+          :closable="false"
+          title="观察期按完工日期起算：首次对照完工前最后一次读数，连续三次增幅不超过 0.05 mm 且最新速率低于预警线才可结案。"
+        />
       </el-form>
       <template #footer>
         <el-button @click="adviceDialogVisible = false">取消</el-button>
@@ -371,14 +419,74 @@ function onOnlyWarningChange(value: string | number | boolean): void {
           <LevelTag :level="drawerTrend.level.value" :rate="drawerTrend.rate.value" size="large" />
           <span v-if="drawerAdvice" class="muted" style="margin-left: 10px">
             建议：{{ drawerAdvice.measure }} · {{ drawerAdvice.state }}
+            <template v-if="drawerAdvice.state === '已完成'">
+              · 完工日期 {{ drawerAdvice.finishedAt || '待补' }}
+            </template>
           </span>
           <span v-else class="muted" style="margin-left: 10px">尚未生成整治建议</span>
         </div>
 
+        <div v-if="drawerTrend.observation.value" class="panel obs-panel">
+          <div class="obs-panel__head">
+            <ObservationTag :status="drawerTrend.observation.value" size="default" />
+            <span class="muted">观察起点以完工日期 {{ drawerTrend.observation.value.finishedAt || '—' }} 为准</span>
+          </div>
+          <p class="obs-panel__hint">{{ drawerTrend.observation.value.hint }}</p>
+          <el-descriptions v-if="drawerTrend.observation.value.baseline" :column="3" border size="small">
+            <el-descriptions-item label="完工前基准">
+              第 {{ drawerTrend.observation.value.baseline.seq }} 次 · {{ drawerTrend.observation.value.baseline.date }}
+            </el-descriptions-item>
+            <el-descriptions-item label="基准宽度">
+              {{ drawerTrend.observation.value.baseline.widthMm.toFixed(2) }} mm
+            </el-descriptions-item>
+            <el-descriptions-item label="连续稳定">
+              {{ drawerTrend.observation.value.stableStreak }} / 3 次，还差 {{ drawerTrend.observation.value.remaining }} 次
+            </el-descriptions-item>
+          </el-descriptions>
+          <el-table
+            v-if="drawerTrend.observation.value.points.length > 0"
+            :data="drawerTrend.observation.value.points"
+            border
+            stripe
+            size="small"
+            style="margin-top: 10px"
+          >
+            <el-table-column prop="seq" label="完工后测次" width="110">
+              <template #default="{ row }">第 {{ row.seq }} 次</template>
+            </el-table-column>
+            <el-table-column prop="date" label="日期" width="110" />
+            <el-table-column label="增幅(mm)" width="100">
+              <template #default="{ row }">
+                <span :style="{ color: row.stable ? '#1e8449' : '#c0392b' }">
+                  {{ row.deltaWidthMm > 0 ? '+' : '' }}{{ row.deltaWidthMm.toFixed(2) }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="月均速率" width="110">
+              <template #default="{ row }">
+                <span :style="{ color: row.rate >= 0.1 ? '#c0392b' : '#1e8449' }">{{ row.rate.toFixed(3) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="判定">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.stable ? 'success' : 'danger'" effect="plain">
+                  {{ row.stable ? '稳定' : '回退/超线·重新累计' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+
         <h4 class="panel-subtitle">测次序列</h4>
-        <el-table :data="drawerTrend.points.value" border stripe size="small">
+        <el-table :data="drawerTrend.points.value" border stripe size="small" :row-class-name="drawerRowClass">
           <el-table-column prop="seq" label="测次" width="70" />
-          <el-table-column prop="date" label="日期" width="120" />
+          <el-table-column label="日期" width="120">
+            <template #default="{ row }">
+              {{ row.date }}
+              <el-tag v-if="isBaselineRow(row.seq)" size="small" type="warning" effect="plain">完工前基准</el-tag>
+              <el-tag v-else-if="isObservationSeq(row.seq)" size="small" type="success" effect="plain">观察期</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="宽度(mm)" width="110">
             <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
           </el-table-column>
@@ -420,5 +528,35 @@ function onOnlyWarningChange(value: string | number | boolean): void {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.obs-panel {
+  margin: 14px 0;
+  padding: 12px 14px;
+  background: #f6f9ff;
+  border: 1px dashed #9db8dd;
+}
+
+.obs-panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.obs-panel__hint {
+  margin: 8px 0 10px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #5b6b82;
+}
+
+:deep(.row-baseline) {
+  background: #fdf3e3 !important;
+}
+
+:deep(.row-observation) {
+  background: #eaf6ee !important;
 }
 </style>

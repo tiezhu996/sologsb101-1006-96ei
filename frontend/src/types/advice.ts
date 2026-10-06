@@ -11,6 +11,12 @@ export interface Advice {
   /** 判定依据 */
   basis: string
   state: AdviceState
+  /**
+   * 整治完工日期 YYYY-MM-DD。
+   * 观察期必须以此为起点（首次对照完工前最后一次读数）；
+   * 已完成的旧记录若缺该日期，界面标「待补」。
+   */
+  finishedAt?: string
   createdAt: number
   updatedAt: number
 }
@@ -39,6 +45,8 @@ export interface AdviceDraft {
   measure: AdviceMeasure
   basis: string
   state: AdviceState
+  /** 整治完工日期 YYYY-MM-DD，空串表示待补 */
+  finishedAt: string
 }
 
 export const EMPTY_ADVICE_DRAFT: AdviceDraft = {
@@ -46,5 +54,6 @@ export const EMPTY_ADVICE_DRAFT: AdviceDraft = {
   level: '一般',
   measure: '观测',
   basis: '',
-  state: '待下发'
+  state: '待下发',
+  finishedAt: ''
 }

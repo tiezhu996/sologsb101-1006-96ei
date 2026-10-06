@@ -15,6 +15,7 @@ import { useSurveyStore } from '@/stores/surveyStore'
 import { formatMileage } from '@/types/section'
 import type { Section } from '@/types/section'
 import { round } from '@/utils/rate'
+import type { ObservationStatus } from '@/utils/observation'
 
 /** 裂缝行（附所属环片/区间与最新发展态势） */
 export interface CrackEnriched {
@@ -26,6 +27,8 @@ export interface CrackEnriched {
   rate: number
   level: AdviceLevel
   surveyCount: number
+  /** 完工后观察期判定（无建议或建议未完成时为 null / 未完工） */
+  observation: ObservationStatus | null
 }
 
 export const useCrackStore = defineStore('crack', () => {
@@ -55,7 +58,8 @@ export const useCrackStore = defineStore('crack', () => {
         sectionLabel: section ? `${section.line} ${formatMileage(ring ? ring.mileage : section.startMileage)}` : '区间已删除',
         rate: summary ? summary.rate : 0,
         level: (summary ? summary.level : '一般') as AdviceLevel,
-        surveyCount: summary ? summary.count : 0
+        surveyCount: summary ? summary.count : 0,
+        observation: surveyStore.observationOf(crack.id)
       }
     })
   )
