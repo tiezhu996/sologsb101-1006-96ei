@@ -14,6 +14,7 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore, type CrackEnriched } from '@/stores/crackStore'
 import { useSurveyStore } from '@/stores/surveyStore'
 import { useSectionStore } from '@/stores/sectionStore'
+import { useAdviceStore } from '@/stores/adviceStore'
 import { useCrackTrend } from '@/hooks/useCrackTrend'
 import {
   EMPTY_SURVEY_DRAFT,
@@ -27,12 +28,29 @@ type FilterModel = { keyword: string; [key: string]: string | string[] | boolean
 const crackStore = useCrackStore()
 const surveyStore = useSurveyStore()
 const sectionStore = useSectionStore()
+const adviceStore = useAdviceStore()
 
 const activeCrackId = computed(() => surveyStore.activeCrackId)
 const activeCrack = computed<CrackEnriched | null>(
   () => crackStore.enriched.find((item) => item.crack.id === activeCrackId.value) ?? null
 )
 const trend = useCrackTrend(activeCrackId)
+
+/** 当前裂缝的完工后观察状态（无完工建议时为 null） */
+const observation = computed(() =>
+  activeCrackId.value ? adviceStore.observationOf(activeCrackId.value) : null
+)
+
+/** 测次 seq -> 观察判定，明细表标注用 */
+const checkBySeq = computed<Record<number, { ok: boolean; delta: number; rate: number; reason: string | null }>>(() => {
+  const status = observation.value
+  if (!status) return {}
+  const map: Record<number, { ok: boolean; delta: number; rate: number; reason: string | null }> = {}
+  status.postSurveys.forEach((survey, index) => {
+    map[survey.seq] = status.checks[index]
+  })
+  return map
+})
 
 /* ------------------------------ 筛选 ------------------------------ */
 
@@ -288,16 +306,55 @@ function selectCrack(crackId: string): void {
                   第{{ point.seq }}次
                 </text>
                 <text :x="point.x" :y="chart.baseline + 36" fill="#8c99ab" font-size="10" text-anchor="middle">
-                  {{ point.date.slice(5) }}
+                  {{ point.date === '待补' ? '日期待补' : point.date.slice(5) }}
                 </text>
               </g>
             </svg>
           </div>
 
+          <!-- 完工后观察：起点按完工日期算，第一次对照完工前最后一次读数 -->
+          <el-alert
+            v-if="observation"
+            :type="observation.phase === 'closed' || observation.canClose ? 'success' : observation.phase === 'datePending' || observation.missingDateCount > 0 ? 'error' : 'warning'"
+            :closable="false"
+            show-icon
+            style="margin: 10px 0"
+          >
+            <template #title>
+              <div>
+                完工后观察 · 完工日期
+                <strong :style="{ color: observation.completedDate ? '#16233a' : '#c0392b' }">
+                  {{ observation.completedDate || '待补' }}
+                </strong>
+              </div>
+              <div style="font-weight: 400; margin-top: 2px">{{ observation.statusText }}</div>
+              <div v-if="observation.baseline" style="font-weight: 400; margin-top: 2px">
+                对照基线：完工前最后一次读数 {{ observation.baseline.widthMm.toFixed(2) }} mm（{{ observation.baseline.date }}）；
+                结案需连续三次增幅 ≤ 0.05 mm 且最新速率低于 0.10 mm/月，回退或超线重新累计。
+              </div>
+            </template>
+          </el-alert>
+
           <h4 class="panel-subtitle">测次明细</h4>
           <el-table :data="trend.surveys.value" border stripe size="small">
             <el-table-column prop="seq" label="测次" width="70" />
-            <el-table-column prop="date" label="复测日期" width="120" />
+            <el-table-column label="复测日期" width="170">
+              <template #default="{ row }">
+                <span v-if="!row.date || row.date === '待补'" style="color: #c0392b; font-weight: 600">
+                  待补
+                </span>
+                <span v-else>{{ row.date }}</span>
+                <el-tag
+                  v-if="observation?.baseline?.id === row.id"
+                  size="small"
+                  type="info"
+                  effect="plain"
+                  style="margin-left: 4px"
+                >
+                  完工前基线
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="宽度(mm)" width="110">
               <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
             </el-table-column>
@@ -309,6 +366,21 @@ function selectCrack(crackId: string): void {
                 <span :style="{ color: row.deltaWidthMm > 0 ? '#c0392b' : '#5b6b82' }">
                   {{ row.deltaWidthMm > 0 ? '+' : '' }}{{ row.deltaWidthMm.toFixed(2) }}
                 </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="观察判定" width="120">
+              <template #default="{ row }">
+                <template v-if="checkBySeq[row.seq]">
+                  <el-tag
+                    size="small"
+                    :type="!row.date || row.date === '待补' ? 'danger' : checkBySeq[row.seq].ok ? 'success' : 'danger'"
+                    effect="light"
+                  >
+                    {{ !row.date || row.date === '待补' ? '日期待补' : checkBySeq[row.seq].ok ? '稳定 +1' : (checkBySeq[row.seq].reason + '重计') }}
+                  </el-tag>
+                </template>
+                <span v-else-if="observation?.baseline?.id === row.id" class="muted">基线对照</span>
+                <span v-else class="muted">—</span>
               </template>
             </el-table-column>
             <el-table-column prop="surveyor" label="复测人" width="100" />

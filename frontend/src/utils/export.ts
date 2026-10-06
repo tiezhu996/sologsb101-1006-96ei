@@ -7,8 +7,10 @@ import type { Ring } from '@/types/ring'
 import type { Crack, CrackState } from '@/types/crack'
 import type { Survey } from '@/types/survey'
 import type { Advice } from '@/types/advice'
+import { isPostCompletionState } from '@/types/advice'
 import { formatMileage } from '@/types/section'
 import { buildSurveyPoints } from '@/utils/rate'
+import { evaluateObservation, observationBadgeText } from '@/utils/observation'
 
 /** 触发浏览器下载 */
 export function download(filename: string, content: string, mime: string): void {
@@ -62,14 +64,24 @@ export function exportCrackCsv(
     '月均速率(mm/月)',
     '建议等级',
     '建议措施',
-    '建议状态'
+    '建议状态',
+    '完工日期',
+    '观察判定'
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   cracks.forEach((crack) => {
     const ring = rings.find((item) => item.id === crack.ringId)
     const section = sections.find((item) => item.id === crack.sectionId)
-    const points = buildSurveyPoints(surveys.filter((survey) => survey.crackId === crack.id))
+    const crackSurveys = surveys.filter((survey) => survey.crackId === crack.id)
+    const points = buildSurveyPoints(crackSurveys)
     const advice = advices.find((item) => item.crackId === crack.id)
+    let completedDate = '—'
+    let observation = '—'
+    if (advice && isPostCompletionState(advice.state)) {
+      completedDate = advice.completedDate || '待补'
+      const status = evaluateObservation(advice, crackSurveys)
+      observation = observationBadgeText(status) || '观察中'
+    }
     lines.push(
       [
         section ? section.line : '—',
@@ -88,7 +100,9 @@ export function exportCrackCsv(
         points.length > 0 ? points[points.length - 1].rate : 0,
         advice ? advice.level : '未分级',
         advice ? advice.measure : '—',
-        advice ? advice.state : '—'
+        advice ? advice.state : '—',
+        completedDate,
+        observation
       ]
         .map(csvCell)
         .join(',')

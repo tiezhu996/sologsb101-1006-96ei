@@ -15,7 +15,7 @@ import type { Advice } from '@/types/advice'
 export const DB_NAME = 'gbtunnelcrack'
 
 /** 当前数据结构版本号：调整表结构必须递增并补 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -52,7 +52,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type SectionRow = Section & Revisioned
 export type RingRow = Ring & Revisioned
@@ -80,7 +80,7 @@ class TunnelCrackDatabase extends Dexie {
     })
 
     // v2：裂缝补充 sectionId 冗余列（按区间筛选/统计免联表）；复测补充 surveyor 索引；建议补充 note 字段
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         sections: 'id, line, structureType, startMileage, updatedAt',
         rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
@@ -99,7 +99,7 @@ class TunnelCrackDatabase extends Dexie {
         ]
         for (const table of tables) {
           await table.toCollection().modify((row: Record<string, unknown>) => {
-            row.revision = ROW_REVISION
+            row.revision = 2
           })
         }
 
@@ -125,6 +125,33 @@ class TunnelCrackDatabase extends Dexie {
               survey.deltaWidthMm = 0
             }
           })
+      })
+
+    // v3：建议补充完工日期 completedDate（完工后观察必须以完工日期为观察起点，结案状态新增「已结案」）
+    this.version(DB_VERSION)
+      .stores({
+        sections: 'id, line, structureType, startMileage, updatedAt',
+        rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
+        cracks: 'id, ringId, sectionId, code, position, direction, state, updatedAt',
+        surveys: 'id, crackId, seq, date, surveyor, updatedAt',
+        advices: 'id, crackId, level, measure, state, completedDate, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 历史已完成建议的完工日期一律缺省，页面标「待补」，不回填猜测日期
+        await tx
+          .table('advices')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION
+            if ((row.state === '已完成' || row.state === '已结案') && typeof row.completedDate !== 'string') {
+              row.completedDate = ''
+            }
+          })
+        for (const name of ['sections', 'rings', 'cracks', 'surveys'] as const) {
+          await tx.table(name).toCollection().modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION
+          })
+        }
       })
   }
 }
@@ -184,7 +211,7 @@ const SEED_CRACKS: CrackRow[] = [
   { id: 'crack-3', ringId: 'ring-2', sectionId: 'sec-1', code: 'SL-132-01', position: '道床', direction: '斜向', widthMm: 0.55, lengthMm: 880, state: '待整治', createdAt: stamp(-104), updatedAt: stamp(-3), revision: ROW_REVISION },
   { id: 'crack-4', ringId: 'ring-3', sectionId: 'sec-1', code: 'SL-145-01', position: '拱顶', direction: '环向', widthMm: 0.24, lengthMm: 350, state: '观察', createdAt: stamp(-99), updatedAt: stamp(-9), revision: ROW_REVISION },
   { id: 'crack-5', ringId: 'ring-4', sectionId: 'sec-2', code: 'NL-027-01', position: '侧墙', direction: '纵向', widthMm: 0.38, lengthMm: 540, state: '已整治', createdAt: stamp(-88), updatedAt: stamp(-20), revision: ROW_REVISION },
-  { id: 'crack-6', ringId: 'ring-5', sectionId: 'sec-2', code: 'NL-041-01', position: '拱顶', direction: '斜向', widthMm: 0.12, lengthMm: 260, state: '观察', createdAt: stamp(-60), updatedAt: stamp(-6), revision: ROW_REVISION }
+  { id: 'crack-6', ringId: 'ring-5', sectionId: 'sec-2', code: 'NL-041-01', position: '拱顶', direction: '斜向', widthMm: 0.14, lengthMm: 260, state: '已整治', createdAt: stamp(-60), updatedAt: stamp(-2), revision: ROW_REVISION }
 ]
 
 const SEED_SURVEYS: SurveyRow[] = [
@@ -203,18 +230,28 @@ const SEED_SURVEYS: SurveyRow[] = [
   // crack-4：0.24 → 0.30，末次月均 0.06 mm/月（一般）
   { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
   { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
-  // crack-5（已整治）：0.38 → 0.46 后停止复测
+  // crack-5（已整治，完工日 2024-04-15）：完工前最后读数 0.46；完工后三次增幅均 ≤0.05mm、
+  // 最新月均速率低于预警线，满足结案条件（但演示数据保留在「已完成」，由人工点结案）
   { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
   { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
-  // crack-6：仅初测一次
-  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
+  { id: 'sv-5-3', crackId: 'crack-5', seq: 3, date: '2024-04-25', widthMm: 0.48, lengthMm: 548, deltaWidthMm: 0.02, surveyor: '陈立', createdAt: stamp(-56), updatedAt: stamp(-56), revision: ROW_REVISION },
+  { id: 'sv-5-4', crackId: 'crack-5', seq: 4, date: '2024-05-25', widthMm: 0.51, lengthMm: 550, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-26), updatedAt: stamp(-26), revision: ROW_REVISION },
+  { id: 'sv-5-5', crackId: 'crack-5', seq: 5, date: '2024-06-16', widthMm: 0.54, lengthMm: 550, deltaWidthMm: 0.03, surveyor: '陈立', createdAt: stamp(-4), updatedAt: stamp(-4), revision: ROW_REVISION },
+  // crack-6（已整治，完工日 2024-05-10）：完工后曾出现一次回退，连续计数清零重计；
+  // 另有一次旧记录缺日期（待补），阻断结案
+  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION },
+  { id: 'sv-6-2', crackId: 'crack-6', seq: 2, date: '2024-05-18', widthMm: 0.15, lengthMm: 265, deltaWidthMm: 0.03, surveyor: '李文博', createdAt: stamp(-33), updatedAt: stamp(-33), revision: ROW_REVISION },
+  { id: 'sv-6-3', crackId: 'crack-6', seq: 3, date: '2024-05-30', widthMm: 0.14, lengthMm: 265, deltaWidthMm: -0.01, surveyor: '李文博', createdAt: stamp(-21), updatedAt: stamp(-21), revision: ROW_REVISION },
+  { id: 'sv-6-4', crackId: 'crack-6', seq: 4, date: '2024-06-09', widthMm: 0.16, lengthMm: 266, deltaWidthMm: 0.02, surveyor: '李文博', createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
+  { id: 'sv-6-5', crackId: 'crack-6', seq: 5, date: '', widthMm: 0.17, lengthMm: 266, deltaWidthMm: 0.01, surveyor: '未署名', createdAt: stamp(-3), updatedAt: stamp(-3), revision: ROW_REVISION }
 ]
 
 const SEED_ADVICES: AdviceRow[] = [
   { id: 'ad-1', crackId: 'crack-1', level: '严重', measure: '钢板带', basis: '月均发展速率 0.310 mm/月，超过严重阈值 0.25 mm/月', state: '已下发', createdAt: stamp(-10), updatedAt: stamp(-2), revision: ROW_REVISION },
   { id: 'ad-2', crackId: 'crack-3', level: '较重', measure: '嵌缝', basis: '月均发展速率 0.260 mm/月，超过预警阈值 0.10 mm/月', state: '待下发', createdAt: stamp(-8), updatedAt: stamp(-8), revision: ROW_REVISION },
-  { id: 'ad-3', crackId: 'crack-5', level: '一般', measure: '观测', basis: '月均发展速率 0.080 mm/月，处于观察范围，整治后继续观测', state: '已完成', createdAt: stamp(-85), updatedAt: stamp(-30), revision: ROW_REVISION },
-  { id: 'ad-4', crackId: 'crack-2', level: '一般', measure: '注浆', basis: '宽度缓慢增长，侧墙环向裂缝建议预防性注浆封堵', state: '待下发', createdAt: stamp(-7), updatedAt: stamp(-7), revision: ROW_REVISION }
+  { id: 'ad-3', crackId: 'crack-5', level: '一般', measure: '观测', basis: '月均发展速率 0.080 mm/月，处于观察范围；2024-04-15 完工后连续复测观察，满足三次稳定即可结案', state: '已完成', completedDate: '2024-04-15', createdAt: stamp(-85), updatedAt: stamp(-4), revision: ROW_REVISION },
+  { id: 'ad-4', crackId: 'crack-2', level: '一般', measure: '注浆', basis: '宽度缓慢增长，侧墙环向裂缝建议预防性注浆封堵', state: '待下发', createdAt: stamp(-7), updatedAt: stamp(-7), revision: ROW_REVISION },
+  { id: 'ad-5', crackId: 'crack-6', level: '一般', measure: '嵌缝', basis: '2024-05-10 完工后观察，期间出现读数回退已重新累计，且有旧复测缺日期待补', state: '已完成', completedDate: '2024-05-10', createdAt: stamp(-25), updatedAt: stamp(-3), revision: ROW_REVISION }
 ]
 
 /** 幂等播种：仅当主表为空时写入演示数据 */
@@ -327,11 +364,20 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.advices.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
+    // 旧版备份可能没有「已结案」状态或完工日期：已完成但缺日期者按「待补」展示并阻断结案
+    const validStates = ['待下发', '已下发', '已完成', '已结案'] as const
+    const normalizedAdvices = (payload.advices ?? []).map((advice) =>
+      rev({
+        ...advice,
+        state: (validStates as readonly string[]).includes(advice.state) ? advice.state : '待下发',
+        completedDate: advice.completedDate ?? ''
+      })
+    )
     await db.sections.bulkPut((payload.sections ?? []).map(rev))
     await db.rings.bulkPut((payload.rings ?? []).map(rev))
     await db.cracks.bulkPut((payload.cracks ?? []).map(rev))
     await db.surveys.bulkPut((payload.surveys ?? []).map(rev))
-    await db.advices.bulkPut((payload.advices ?? []).map(rev))
+    await db.advices.bulkPut(normalizedAdvices)
   })
 }
 

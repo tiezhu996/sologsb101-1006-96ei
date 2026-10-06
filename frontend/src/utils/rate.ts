@@ -72,21 +72,24 @@ export const LEVEL_WEIGHT: Record<AdviceLevel, number> = {
   严重: 30
 }
 
-/** 把某条裂缝的全部测次整理成折线取点（按测次升序） */
+/** 把某条裂缝的全部测次整理成折线取点（按测次升序；缺日期标「待补」，速率不估） */
 export function buildSurveyPoints(surveys: Survey[]): SurveyPoint[] {
   const sorted = [...surveys].sort((a, b) => a.seq - b.seq)
   const points: SurveyPoint[] = []
   sorted.forEach((survey, index) => {
     const previous = index === 0 ? null : sorted[index - 1]
     const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
-    const days = previous ? daysBetween(previous.date, survey.date) : 1
+    const dateMissing = !survey.date || survey.date === '待补'
+    const prevMissing = previous ? !previous.date || previous.date === '待补' : true
+    const days = previous && !dateMissing && !prevMissing ? daysBetween(previous.date, survey.date) : 1
     points.push({
       seq: survey.seq,
-      date: survey.date,
+      date: dateMissing ? '待补' : survey.date,
       widthMm: survey.widthMm,
       lengthMm: survey.lengthMm,
       deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
-      rate: previous ? monthlyRate(rawDelta, days) : 0
+      // 日期待补无法计算间隔，速率置 0 避免污染分级（观察判定也不采用该测次）
+      rate: previous && !dateMissing && !prevMissing ? monthlyRate(rawDelta, days) : 0
     })
   })
   return points

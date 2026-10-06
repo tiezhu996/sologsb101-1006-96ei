@@ -14,7 +14,7 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore, type CrackEnriched } from '@/stores/crackStore'
 import { useSectionStore } from '@/stores/sectionStore'
 import { useSurveyStore } from '@/stores/surveyStore'
-import { useIdbTable } from '@/hooks/useIdbTable'
+import { useAdviceStore } from '@/stores/adviceStore'
 import { useCrackTrend } from '@/hooks/useCrackTrend'
 import { db, type AdviceRow } from '@/utils/db'
 import {
@@ -22,10 +22,12 @@ import {
   ADVICE_MEASURES,
   ADVICE_STATES,
   LEVEL_MEASURE_SUGGEST,
+  isPostCompletionState,
   type Advice,
   type AdviceDraft
 } from '@/types/advice'
 import { basisText, RATE_SEVERE, RATE_WARNING, round } from '@/utils/rate'
+import { observationBadgeText, type ObservationStatus } from '@/utils/observation'
 import type { CrackDirection, CrackPosition } from '@/types/crack'
 
 type FilterModel = { keyword: string; [key: string]: string | string[] | boolean }
@@ -33,7 +35,7 @@ type FilterModel = { keyword: string; [key: string]: string | string[] | boolean
 const crackStore = useCrackStore()
 const surveyStore = useSurveyStore()
 const sectionStore = useSectionStore()
-const adviceTable = useIdbTable<AdviceRow>((database) => database.advices)
+const adviceStore = useAdviceStore()
 
 const drawerVisible = ref(false)
 const drawerCrackId = ref<string | null>(null)
@@ -84,7 +86,7 @@ const averageRate = computed(() => {
 /* --------------------------- 建议生成 --------------------------- */
 
 function adviceOf(crackId: string): Advice | null {
-  return adviceTable.rows.value.find((row) => row.crackId === crackId) ?? null
+  return adviceStore.adviceOf(crackId)
 }
 
 async function generateAdvice(row: CrackEnriched): Promise<void> {
@@ -108,6 +110,27 @@ async function generateAdvice(row: CrackEnriched): Promise<void> {
   ElMessage.success(`已按「${level}」生成整治建议草稿：${advice.measure}`)
 }
 
+/* --------------------------- 观察结案 --------------------------- */
+
+function observationOf(crackId: string): ObservationStatus | null {
+  return adviceStore.observationOf(crackId)
+}
+
+function obsBadge(crackId: string): string {
+  return observationBadgeText(observationOf(crackId))
+}
+
+async function closeAdvice(row: CrackEnriched): Promise<void> {
+  const advice = adviceOf(row.crack.id)
+  if (!advice) return
+  const error = await adviceStore.closeAdvice(advice.id)
+  if (error) {
+    ElMessage.warning(`${row.crack.code} ${error}`)
+    return
+  }
+  ElMessage.success(`${row.crack.code} 完工后观察判定通过，已结案`)
+}
+
 /* --------------------------- 建议维护 --------------------------- */
 
 const adviceDialogVisible = ref(false)
@@ -116,7 +139,8 @@ const adviceForm = reactive<AdviceDraft>({
   level: '一般',
   measure: '观测',
   basis: '',
-  state: '待下发'
+  state: '待下发',
+  completedDate: ''
 })
 
 function openAdviceEdit(row: CrackEnriched): void {
@@ -125,26 +149,18 @@ function openAdviceEdit(row: CrackEnriched): void {
     void generateAdvice(row)
     return
   }
-  Object.assign(adviceForm, {
-    crackId: advice.crackId,
-    level: advice.level,
-    measure: advice.measure,
-    basis: advice.basis,
-    state: advice.state
-  })
+  Object.assign(adviceForm, adviceStore.draftOf(advice))
   adviceDialogVisible.value = true
 }
 
 async function submitAdvice(): Promise<void> {
   const advice = adviceOf(adviceForm.crackId)
   if (!advice) return
-  await db.advices.update(advice.id, {
-    level: adviceForm.level,
-    measure: adviceForm.measure,
-    basis: adviceForm.basis.trim(),
-    state: adviceForm.state,
-    updatedAt: Date.now()
-  })
+  const error = await adviceStore.saveAdvice(advice.id, { ...adviceForm })
+  if (error) {
+    ElMessage.warning(error)
+    return
+  }
   ElMessage.success('整治建议已更新')
   adviceDialogVisible.value = false
 }
@@ -158,7 +174,7 @@ async function removeAdvice(row: CrackEnriched): Promise<void> {
     { type: 'warning', confirmButtonText: '确认撤销', cancelButtonText: '取消' }
   ).catch(() => false)
   if (!confirmed) return
-  await db.advices.delete(advice.id)
+  await adviceStore.removeAdvice(advice.id)
   ElMessage.success('整治建议已撤销')
 }
 
@@ -178,6 +194,27 @@ const rateThresholds = computed(() => ({ warning: RATE_WARNING, severe: RATE_SEV
 const drawerAdvice = computed(() =>
   drawerCrackId.value ? adviceOf(drawerCrackId.value) : null
 )
+
+/** 抽屉内完工后观察状态 */
+const drawerObservation = computed(() =>
+  drawerCrackId.value ? observationOf(drawerCrackId.value) : null
+)
+
+/** 观察测次判定明细（与 points 按 seq 对齐） */
+const drawerCheckBySeq = computed<Record<number, { ok: boolean; delta: number; rate: number; reason: string | null }>>(() => {
+  const status = drawerObservation.value
+  if (!status) return {}
+  const map: Record<number, { ok: boolean; delta: number; rate: number; reason: string | null }> = {}
+  status.postSurveys.forEach((survey, index) => {
+    map[survey.seq] = status.checks[index]
+  })
+  return map
+})
+
+async function drawerCloseAdvice(): Promise<void> {
+  if (!drawerCrack.value) return
+  await closeAdvice(drawerCrack.value)
+}
 
 function crackRowKey(row: CrackEnriched): string {
   return row.crack.id
@@ -283,15 +320,30 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <LevelTag :level="row.level" :rate="row.surveyCount > 1 ? row.rate : undefined" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="建议" width="120">
+        <el-table-column label="建议" min-width="180">
           <template #default="{ row }">
-            <el-tag v-if="adviceOf(row.crack.id)" size="small" effect="plain" type="success">
-              {{ adviceOf(row.crack.id)?.state }}
-            </el-tag>
+            <template v-if="adviceOf(row.crack.id)">
+              <el-tag
+                size="small"
+                effect="plain"
+                :type="adviceOf(row.crack.id)?.state === '已结案' ? 'success' : adviceOf(row.crack.id)?.state === '已完成' ? 'warning' : 'success'"
+              >
+                {{ adviceOf(row.crack.id)?.state }}
+              </el-tag>
+              <el-tag
+                v-if="obsBadge(row.crack.id)"
+                size="small"
+                :type="adviceOf(row.crack.id)?.state === '已结案' ? 'success' : observationOf(row.crack.id)?.canClose ? 'success' : 'warning'"
+                effect="light"
+                style="margin-left: 4px"
+              >
+                {{ obsBadge(row.crack.id) }}
+              </el-tag>
+            </template>
             <span v-else class="muted">未生成</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="196" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text type="primary" @click="openDrawer(row)">
               <el-icon><View /></el-icon> 曲线
@@ -310,6 +362,17 @@ function onOnlyWarningChange(value: string | number | boolean): void {
               维护
             </el-button>
             <el-button
+              v-if="adviceOf(row.crack.id)?.state === '已完成'"
+              size="small"
+              text
+              type="success"
+              :disabled="!observationOf(row.crack.id)?.canClose"
+              @click="closeAdvice(row)"
+            >
+              结案
+            </el-button>
+            <el-button
+              v-else
               size="small"
               text
               type="danger"
@@ -347,6 +410,22 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <el-option v-for="item in ADVICE_STATES" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
+        <el-form-item label="完工日期">
+          <el-date-picker
+            v-model="adviceForm.completedDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            :placeholder="isPostCompletionState(adviceForm.state) ? '必填：观察按完工日期起算' : '完工后填写'"
+            :disabled="!isPostCompletionState(adviceForm.state)"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-alert
+          v-if="isPostCompletionState(adviceForm.state)"
+          type="warning"
+          :closable="false"
+          title="已完工建议必须填写完工日期：第一次观察对照完工前最后一次读数，连续三次稳定才可结案。"
+        />
       </el-form>
       <template #footer>
         <el-button @click="adviceDialogVisible = false">取消</el-button>
@@ -371,14 +450,59 @@ function onOnlyWarningChange(value: string | number | boolean): void {
           <LevelTag :level="drawerTrend.level.value" :rate="drawerTrend.rate.value" size="large" />
           <span v-if="drawerAdvice" class="muted" style="margin-left: 10px">
             建议：{{ drawerAdvice.measure }} · {{ drawerAdvice.state }}
+            <template v-if="isPostCompletionState(drawerAdvice.state)">
+              · 完工 {{ drawerAdvice.completedDate || '待补' }}
+            </template>
           </span>
           <span v-else class="muted" style="margin-left: 10px">尚未生成整治建议</span>
         </div>
 
+        <!-- 完工后观察判定：观察以完工日期为准，不用整治前稳定读数充数 -->
+        <el-alert
+          v-if="drawerObservation"
+          :type="drawerObservation.phase === 'closed' || drawerObservation.canClose ? 'success' : drawerObservation.phase === 'datePending' || drawerObservation.missingDateCount > 0 ? 'error' : 'warning'"
+          :closable="false"
+          show-icon
+          style="margin: 10px 0"
+        >
+          <template #title>
+            <div>完工后观察判定（完工日 {{ drawerObservation.completedDate || '待补' }}）</div>
+            <div style="font-weight: 400; margin-top: 2px">{{ drawerObservation.statusText }}</div>
+            <div v-if="drawerObservation.baseline" style="font-weight: 400; margin-top: 2px">
+              基线：完工前最后一次读数 {{ drawerObservation.baseline.widthMm.toFixed(2) }} mm
+              （{{ drawerObservation.baseline.date }}）· 已连续稳定 {{ drawerObservation.streak }} 次，还差 {{ drawerObservation.remaining }} 次
+            </div>
+          </template>
+          <template #default>
+            <div v-if="drawerAdvice?.state === '已完成'" style="margin-top: 8px">
+              <el-button size="small" type="success" plain :disabled="!drawerObservation.canClose" @click="drawerCloseAdvice">
+                满足条件，结案
+              </el-button>
+              <span v-if="!drawerObservation.canClose" class="muted" style="margin-left: 8px; font-size: 12px">
+                需连续三次增幅 ≤ 0.05 mm 且最新速率低于 {{ RATE_WARNING }} mm/月
+              </span>
+            </div>
+          </template>
+        </el-alert>
+
         <h4 class="panel-subtitle">测次序列</h4>
         <el-table :data="drawerTrend.points.value" border stripe size="small">
           <el-table-column prop="seq" label="测次" width="70" />
-          <el-table-column prop="date" label="日期" width="120" />
+          <el-table-column label="日期" width="150">
+            <template #default="{ row }">
+              <span v-if="row.date === '待补'" style="color: #c0392b; font-weight: 600">待补</span>
+              <span v-else>{{ row.date }}</span>
+              <el-tag
+                v-if="drawerObservation?.baseline?.seq === row.seq"
+                size="small"
+                type="info"
+                effect="plain"
+                style="margin-left: 4px"
+              >
+                完工前基线
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="宽度(mm)" width="110">
             <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
           </el-table-column>
@@ -387,6 +511,16 @@ function onOnlyWarningChange(value: string | number | boolean): void {
           </el-table-column>
           <el-table-column label="月均速率" width="120">
             <template #default="{ row }">{{ row.rate.toFixed(3) }}</template>
+          </el-table-column>
+          <el-table-column label="观察判定" width="110">
+            <template #default="{ row }">
+              <template v-if="drawerCheckBySeq[row.seq]">
+                <el-tag size="small" :type="drawerCheckBySeq[row.seq].ok ? 'success' : 'danger'" effect="light">
+                  {{ drawerCheckBySeq[row.seq].ok ? '稳定' : (drawerCheckBySeq[row.seq].reason || '待补') }}
+                </el-tag>
+              </template>
+              <span v-else class="muted">—</span>
+            </template>
           </el-table-column>
         </el-table>
 

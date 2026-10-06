@@ -1,12 +1,24 @@
 <script setup lang="ts">
 /**
  * /backup 整治建议与结构版本导出
- * 维护建议措施与状态流转，导入导出全量 JSON，重置演示数据。
+ * 维护建议措施与状态流转（含完工日期、完工后观察结案），导入导出全量 JSON，重置演示数据。
+ * 观察判定口径：以整治完工日期为观察起点，连续三次稳定且最新速率低于预警线才可结案。
  * 消费全部模型；复用 <EmptyPanel>、<LevelTag>、<FilterBar>、<StatBadge>。
  */
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { Delete, Download, Edit, Plus, Refresh, RefreshRight, Right, Upload } from '@element-plus/icons-vue'
+import {
+  Calendar,
+  Delete,
+  Download,
+  Edit,
+  Plus,
+  Refresh,
+  RefreshRight,
+  Right,
+  Select,
+  Upload
+} from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import LevelTag from '@/components/common/LevelTag.vue'
@@ -14,7 +26,7 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useCrackStore } from '@/stores/crackStore'
 import { useSectionStore } from '@/stores/sectionStore'
 import { useSurveyStore } from '@/stores/surveyStore'
-import { useIdbTable } from '@/hooks/useIdbTable'
+import { useAdviceStore } from '@/stores/adviceStore'
 import {
   DB_VERSION,
   clearAllTables,
@@ -35,18 +47,20 @@ import {
   ADVICE_STATES,
   ADVICE_STATE_FLOW,
   EMPTY_ADVICE_DRAFT,
+  isPostCompletionState,
   type AdviceDraft,
   type AdviceState
 } from '@/types/advice'
 import { exportCrackCsv } from '@/utils/export'
 import { formatMm } from '@/utils/rate'
+import { observationBadgeText } from '@/utils/observation'
 
 type FilterModel = { keyword: string; [key: string]: string | string[] | boolean }
 
 const crackStore = useCrackStore()
 const surveyStore = useSurveyStore()
 const sectionStore = useSectionStore()
-const adviceTable = useIdbTable<AdviceRow>((database) => database.advices, { sortByUpdatedAt: false })
+const adviceStore = useAdviceStore()
 
 const counts = ref<Record<string, number>>({})
 const lastBackupAt = ref<string | null>(readLastBackupAt())
@@ -83,7 +97,7 @@ function crackOf(crackId: string) {
 }
 
 const rows = computed(() =>
-  adviceTable.rows.value
+  adviceStore.advices
     .filter((advice) => {
       if (stateFilter.value.length > 0 && !stateFilter.value.includes(advice.state)) return false
       const text = keyword.value.trim().toLowerCase()
@@ -98,9 +112,29 @@ const rows = computed(() =>
     .sort((a, b) => ADVICE_LEVELS.indexOf(b.level) - ADVICE_LEVELS.indexOf(a.level))
 )
 
-const pendingCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '待下发').length)
-const issuedCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '已下发').length)
-const doneCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '已完成').length)
+const pendingCount = computed(() => adviceStore.advices.filter((item) => item.state === '待下发').length)
+const issuedCount = computed(() => adviceStore.advices.filter((item) => item.state === '已下发').length)
+const doneCount = computed(() => adviceStore.advices.filter((item) => item.state === '已完成').length)
+const closedCount = computed(() => adviceStore.closedCount)
+
+/** 观察徽标文案（仅完工后建议） */
+function observationText(crackId: string): string {
+  return observationBadgeText(adviceStore.observationOf(crackId))
+}
+
+function observationTagType(state: AdviceState, crackId: string): 'success' | 'warning' | 'info' | 'primary' | 'danger' {
+  if (state === '已结案') return 'success'
+  const status = adviceStore.observationOf(crackId)
+  if (!status) return 'info'
+  if (status.phase === 'datePending' || status.missingDateCount > 0) return 'danger'
+  if (status.canClose) return 'success'
+  return 'warning'
+}
+
+function completedDateText(advice: AdviceRow): string {
+  if (!isPostCompletionState(advice.state)) return '—'
+  return advice.completedDate && advice.completedDate !== '待补' ? advice.completedDate : '待补'
+}
 
 /* ------------------------------ 表单 ------------------------------ */
 
@@ -110,10 +144,25 @@ const formRef = ref<FormInstance>()
 const form = reactive<AdviceDraft>({ ...EMPTY_ADVICE_DRAFT })
 let editingId: string | null = null
 
-const rules: FormRules = {
+/** 完工日期仅在「已完成 / 已结案」时必填 */
+const completedDateRequired = computed(() => isPostCompletionState(form.state))
+
+const rules = computed<FormRules>(() => ({
   crackId: [{ required: true, message: '请选择裂缝', trigger: 'change' }],
-  basis: [{ required: true, message: '请填写判定依据', trigger: 'blur' }]
-}
+  basis: [{ required: true, message: '请填写判定依据', trigger: 'blur' }],
+  completedDate: [
+    {
+      validator: (_rule, value: string, callback: (error?: Error) => void) => {
+        if (completedDateRequired.value && (!value || value === '待补')) {
+          callback(new Error('已完工建议必须填写完工日期，观察按完工日期起算'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'change'
+    }
+  ]
+}))
 
 const crackOptions = computed(() =>
   crackStore.cracks.map((crack) => {
@@ -141,13 +190,7 @@ function openCreate(): void {
 function openEdit(advice: AdviceRow): void {
   editingId = advice.id
   dialogTitle.value = `编辑整治建议 · ${crackOf(advice.crackId)?.code ?? ''}`
-  Object.assign(form, {
-    crackId: advice.crackId,
-    level: advice.level,
-    measure: advice.measure,
-    basis: advice.basis,
-    state: advice.state
-  })
+  Object.assign(form, adviceStore.draftOf(advice))
   dialogVisible.value = true
 }
 
@@ -156,13 +199,12 @@ async function submit(): Promise<void> {
   if (!instance) return
   const valid = await instance.validate().catch(() => false)
   if (!valid) return
-  if (editingId) {
-    await adviceTable.update(editingId, { ...form })
-    ElMessage.success('整治建议已更新')
-  } else {
-    await adviceTable.create({ ...form }, 'ad')
-    ElMessage.success('整治建议已创建')
+  const error = await adviceStore.saveAdvice(editingId, { ...form })
+  if (error) {
+    ElMessage.warning(error)
+    return
   }
+  ElMessage.success(editingId ? '整治建议已更新' : '整治建议已创建')
   dialogVisible.value = false
   await refreshCounts()
 }
@@ -174,20 +216,74 @@ async function removeAdvice(advice: AdviceRow): Promise<void> {
     { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }
   ).catch(() => false)
   if (!confirmed) return
-  await adviceTable.remove(advice.id)
+  await adviceStore.removeAdvice(advice.id)
   ElMessage.success('整治建议已删除')
   await refreshCounts()
 }
 
+/**
+ * 状态流转：
+ * - 转「已完成」弹完工日期确认框（整治建议完成后常漏填日期，必须在此补齐）；
+ * - 转「已结案」走观察判定，不达标会提示还差几次 / 回退重计 / 日期待补。
+ */
 async function advance(advice: AdviceRow): Promise<void> {
   const next = ADVICE_STATE_FLOW[advice.state]
   if (!next) {
-    ElMessage.info('该建议已完成闭环')
+    ElMessage.info('该建议已结案闭环')
     return
   }
-  await adviceTable.update(advice.id, { state: next })
-  ElMessage.success(`建议状态已推进为「${next}」`)
+  if (next === '已完成') {
+    const { value } = await ElMessageBox.prompt('请填写整治完工日期（复测观察自该日期起算）', '完工确认', {
+      confirmButtonText: '确认完工',
+      cancelButtonText: '取消',
+      inputPlaceholder: 'YYYY-MM-DD',
+      inputValue: advice.completedDate || new Date().toISOString().slice(0, 10),
+      inputPattern: /^\d{4}-\d{2}-\d{2}$/,
+      inputErrorMessage: '请按 YYYY-MM-DD 格式填写完工日期'
+    }).catch(() => ({ value: '' }))
+    if (!value) return
+    const error = await adviceStore.advanceState(advice, value)
+    if (error) {
+      ElMessage.warning(error)
+      return
+    }
+    ElMessage.success(`已记录完工日期 ${value}，复测观察从完工后第一次读数开始累计`)
+    await refreshCounts()
+    return
+  }
+  const error = await adviceStore.advanceState(advice)
+  if (error) {
+    ElMessage.warning(error)
+    return
+  }
+  ElMessage.success('观察判定通过，建议已结案')
   await refreshCounts()
+}
+
+/** 老建议已完工但缺日期：单独补录 */
+const dateDialogVisible = ref(false)
+const dateEditing = ref<AdviceRow | null>(null)
+const dateForm = reactive({ completedDate: '' })
+
+function openDatePatch(advice: AdviceRow): void {
+  dateEditing.value = advice
+  dateForm.completedDate = advice.completedDate && advice.completedDate !== '待补' ? advice.completedDate : ''
+  dateDialogVisible.value = true
+}
+
+async function submitDatePatch(): Promise<void> {
+  if (!dateEditing.value) return
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateForm.completedDate)) {
+    ElMessage.warning('请按 YYYY-MM-DD 格式填写完工日期')
+    return
+  }
+  const error = await adviceStore.patchCompletedDate(dateEditing.value.id, dateForm.completedDate)
+  if (error) {
+    ElMessage.warning(error)
+    return
+  }
+  ElMessage.success('完工日期已补录，观察判定已按新起点重算')
+  dateDialogVisible.value = false
 }
 
 /* ---------------------------- 备份与恢复 ---------------------------- */
@@ -293,7 +389,7 @@ function adviceRowKey(row: AdviceRow): string {
       <div>
         <h2 class="page-head__title">整治建议与数据备份</h2>
         <p class="page-head__desc">
-          维护建议措施与状态流转（待下发 → 已下发 → 已完成），并导出/导入 IndexedDB 全量 JSON 存档。
+          维护建议措施与状态流转（待下发 → 已下发 → 已完成 → 已结案）；完工后复测观察以完工日期为起点，连续三次增幅 ≤ 0.05 mm 且最新速率低于预警线才可结案。
         </p>
       </div>
       <div class="page-head__actions">
@@ -305,10 +401,11 @@ function adviceRowKey(row: AdviceRow): string {
     </div>
 
     <div class="stat-row">
-      <StatBadge label="建议总数" :value="adviceTable.rows.value.length" suffix="条" icon="Files" tone="primary" />
+      <StatBadge label="建议总数" :value="adviceStore.advices.length" suffix="条" icon="Files" tone="primary" />
       <StatBadge label="待下发" :value="pendingCount" suffix="条" icon="Histogram" tone="warning" />
       <StatBadge label="已下发" :value="issuedCount" suffix="条" icon="DataLine" tone="info" />
-      <StatBadge label="已完成" :value="doneCount" suffix="条" icon="CircleCheckFilled" tone="success" />
+      <StatBadge label="已完成待结案" :value="doneCount" suffix="条" icon="View" tone="warning" />
+      <StatBadge label="已结案" :value="closedCount" suffix="条" icon="CircleCheckFilled" tone="success" />
     </div>
 
     <FilterBar
@@ -361,23 +458,57 @@ function adviceRowKey(row: AdviceRow): string {
             <el-tag size="small" effect="plain">{{ row.measure }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="basis" label="判定依据" min-width="240" show-overflow-tooltip />
-        <el-table-column label="状态" width="110">
+        <el-table-column prop="basis" label="判定依据" min-width="220" show-overflow-tooltip />
+        <el-table-column label="完工日期" width="130">
+          <template #default="{ row }">
+            <span v-if="completedDateText(row) === '待补'" style="color: #c0392b; font-weight: 600">
+              <el-icon style="vertical-align: -2px"><Calendar /></el-icon> 待补
+            </span>
+            <span v-else-if="completedDateText(row) === '—'" class="muted">—</span>
+            <span v-else>{{ row.completedDate }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="观察判定" min-width="200">
+          <template #default="{ row }">
+            <span v-if="observationText(row.crackId)" class="obs-cell">
+              <el-tag size="small" :type="observationTagType(row.state, row.crackId)" effect="light">
+                {{ observationText(row.crackId) }}
+              </el-tag>
+              <el-button
+                v-if="row.state === '已完成' && completedDateText(row) === '待补'"
+                size="small"
+                text
+                type="danger"
+                @click="openDatePatch(row)"
+              >
+                补日期
+              </el-button>
+            </span>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag
               size="small"
-              :type="row.state === '已完成' ? 'success' : row.state === '已下发' ? 'primary' : 'warning'"
+              :type="row.state === '已结案' ? 'success' : row.state === '已完成' ? 'warning' : row.state === '已下发' ? 'primary' : 'info'"
             >
               {{ adviceStateText(row.state) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text type="primary" @click="openEdit(row)">
               <el-icon><Edit /></el-icon> 编辑
             </el-button>
-            <el-button size="small" text type="primary" :disabled="!ADVICE_STATE_FLOW[row.state as AdviceState]" @click="advance(row)">
+            <el-button
+              size="small"
+              text
+              :type="ADVICE_STATE_FLOW[row.state as AdviceState] === '已结案' ? 'success' : 'primary'"
+              :disabled="!ADVICE_STATE_FLOW[row.state as AdviceState]"
+              @click="advance(row)"
+            >
               <el-icon><Right /></el-icon>
               {{ ADVICE_STATE_FLOW[row.state as AdviceState] ? `转${ADVICE_STATE_FLOW[row.state as AdviceState]}` : '已闭环' }}
             </el-button>
@@ -439,10 +570,48 @@ function adviceRowKey(row: AdviceRow): string {
             <el-option v-for="item in ADVICE_STATES" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
+        <el-form-item label="完工日期" prop="completedDate">
+          <el-date-picker
+            v-model="form.completedDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            :placeholder="completedDateRequired ? '必填：观察按完工日期起算' : '完工后填写'"
+            :disabled="!completedDateRequired"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-alert
+          v-if="completedDateRequired"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="观察起点口径：第一次观察对照完工前最后一次读数，之后连续三次增幅 ≤ 0.05 mm 且最新速率低于预警线才可结案；选错日期会让整治前稳定读数充数。"
+        />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="dateDialogVisible" title="补录整治完工日期" width="440px">
+      <el-alert
+        type="error"
+        :closable="false"
+        show-icon
+        title="该建议已标记完工但缺少完工日期，无法确定复测观察起点。补录后系统将按新起点重新判定，整治前读数仅作基线。"
+        style="margin-bottom: 14px"
+      />
+      <el-date-picker
+        v-model="dateForm.completedDate"
+        type="date"
+        value-format="YYYY-MM-DD"
+        placeholder="选择整治完工日期 YYYY-MM-DD"
+        style="width: 100%"
+      />
+      <template #footer>
+        <el-button @click="dateDialogVisible = false">取消</el-button>
+        <el-button type="primary" :icon="Select" @click="submitDatePatch">确认补录</el-button>
       </template>
     </el-dialog>
   </div>
@@ -453,6 +622,12 @@ function adviceRowKey(row: AdviceRow): string {
   margin: 0 0 12px;
   font-size: 15px;
   font-weight: 600;
+}
+
+.obs-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .panel-head {

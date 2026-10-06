@@ -16,6 +16,19 @@ export interface Survey {
   updatedAt: number
 }
 
+/** 复测日期占位：历史记录缺日期时标「待补」，不参与速率与观察判定 */
+export const SURVEY_DATE_PENDING = '待补'
+
+export function isPendingDate(date: string | null | undefined): boolean {
+  return !date || date.trim().length === 0 || date === SURVEY_DATE_PENDING
+}
+
+/** 判断 YYYY-MM-DD 是否为可参与计算的有效日期（「待补」等占位值返回 false） */
+export function isValidSurveyDate(date: string | null | undefined): date is string {
+  if (isPendingDate(date)) return false
+  return /^\d{4}-\d{2}-\d{2}$/.test(date as string) && !Number.isNaN(Date.parse(`${date}T00:00:00`))
+}
+
 export interface SurveyDraft {
   crackId: string
   date: string

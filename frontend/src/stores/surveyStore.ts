@@ -141,11 +141,16 @@ export const useSurveyStore = defineStore('survey', () => {
     await recalculate(row.crackId)
   }
 
-  /** 重排某条裂缝的测次序号，并按日期顺序重算变化量 */
+  /** 重排某条裂缝的测次序号；有日期者按日期排序，缺日期的旧记录排在最前待补 */
   async function recalculate(crackId: string): Promise<void> {
-    const rows = (await db.surveys.where('crackId').equals(crackId).toArray()).sort((a, b) =>
-      a.date === b.date ? a.seq - b.seq : a.date.localeCompare(b.date)
-    )
+    const rows = (await db.surveys.where('crackId').equals(crackId).toArray()).sort((a, b) => {
+      const aMissing = !a.date || a.date === '待补'
+      const bMissing = !b.date || b.date === '待补'
+      if (aMissing && bMissing) return a.seq - b.seq
+      if (aMissing) return -1
+      if (bMissing) return 1
+      return a.date === b.date ? a.seq - b.seq : a.date.localeCompare(b.date)
+    })
     const patches = rows.map((row, index) => {
       const previous = index === 0 ? null : rows[index - 1]
       return {
